@@ -1,0 +1,537 @@
+/* Summit Updates — prototype
+ * Plain JS, data persisted in localStorage.
+ */
+(function () {
+  "use strict";
+
+  const STORAGE_KEY = "summit-updates:data:v1";
+  const SESSION_KEY = "summit-updates:session:v1";
+
+  /* ---------------- Seed data ---------------- */
+
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+
+  function buildSeed() {
+    const now = Date.now();
+
+    const stores = [
+      { id: "s1", number: 1, name: "Downtown" },
+      { id: "s2", number: 2, name: "Westfield Mall" },
+      { id: "s3", number: 3, name: "Riverside" },
+      { id: "s4", number: 4, name: "Northgate" },
+      { id: "s5", number: 5, name: "Lakeview" },
+    ];
+
+    const users = [
+      { id: "u-michael", name: "Michael Torres", role: "ops", storeId: null },
+
+      { id: "u-rachel", name: "Rachel Adams", role: "store_manager", storeId: "s1" },
+      { id: "u-daniel", name: "Daniel Kim", role: "store_manager", storeId: "s2" },
+      { id: "u-priya", name: "Priya Shah", role: "store_manager", storeId: "s3" },
+      { id: "u-marcus", name: "Marcus Bell", role: "store_manager", storeId: "s4" },
+      { id: "u-elena", name: "Elena Ruiz", role: "store_manager", storeId: "s5" },
+
+      { id: "u-alex", name: "Alex Chen", role: "employee", storeId: "s1" },
+      { id: "u-jordan", name: "Jordan Lee", role: "employee", storeId: "s1" },
+      { id: "u-sam", name: "Sam Patel", role: "employee", storeId: "s1" },
+      { id: "u-taylor", name: "Taylor Brooks", role: "employee", storeId: "s1" },
+
+      { id: "u-maria", name: "Maria Gonzalez", role: "employee", storeId: "s2" },
+      { id: "u-chris", name: "Chris Walker", role: "employee", storeId: "s2" },
+      { id: "u-aisha", name: "Aisha Mohammed", role: "employee", storeId: "s2" },
+
+      { id: "u-ben", name: "Ben Carter", role: "employee", storeId: "s3" },
+      { id: "u-olivia", name: "Olivia Nguyen", role: "employee", storeId: "s3" },
+      { id: "u-luis", name: "Luis Herrera", role: "employee", storeId: "s3" },
+      { id: "u-hannah", name: "Hannah Scott", role: "employee", storeId: "s3" },
+
+      { id: "u-jamal", name: "Jamal Wright", role: "employee", storeId: "s4" },
+      { id: "u-emily", name: "Emily Turner", role: "employee", storeId: "s4" },
+      { id: "u-noah", name: "Noah Fischer", role: "employee", storeId: "s4" },
+
+      { id: "u-grace", name: "Grace Liu", role: "employee", storeId: "s5" },
+      { id: "u-kevin", name: "Kevin O'Brien", role: "employee", storeId: "s5" },
+      { id: "u-sofia", name: "Sofia Rossi", role: "employee", storeId: "s5" },
+      { id: "u-tyler", name: "Tyler Reed", role: "employee", storeId: "s5" },
+    ];
+
+    const ALL = stores.map((s) => s.id);
+
+    const announcements = [
+      {
+        id: "a1",
+        title: "New refund policy starts Monday",
+        body:
+          "Starting Monday, refunds over $100 need a manager override at the register. " +
+          "Receipts are still required for all refunds. Ask your store manager if you're unsure how the override works.",
+        storeIds: ALL,
+        required: true,
+        authorId: "u-michael",
+        createdAt: now - 2 * DAY,
+      },
+      {
+        id: "a2",
+        title: "Fire inspection Thursday — keep the back hallway clear",
+        body:
+          "The fire marshal visits Thursday morning. Nothing can be stored in the back hallway or in front of the emergency exits. " +
+          "Please move any boxes to the stockroom before end of shift Wednesday.",
+        storeIds: ["s1"],
+        required: true,
+        authorId: "u-rachel",
+        createdAt: now - 5 * HOUR,
+      },
+      {
+        id: "a3",
+        title: "Holiday shift requests due Nov 15",
+        body: "Submit your availability for Thanksgiving week and December weekends by Nov 15. Requests are first-come, first-served.",
+        storeIds: ALL,
+        required: false,
+        authorId: "u-michael",
+        createdAt: now - 1 * DAY - 3 * HOUR,
+      },
+      {
+        id: "a4",
+        title: "Great weekend, team!",
+        body: "Saturday was our best day since August. Thank you all for staying on top of the fitting rooms and the line. Pizza in the break room Friday.",
+        storeIds: ["s1"],
+        required: false,
+        authorId: "u-rachel",
+        createdAt: now - 3 * DAY,
+      },
+      {
+        id: "a5",
+        title: "Winter displays arrive Tuesday",
+        body: "Truck is scheduled for 7am Tuesday. Openers, plan to help unload and set up the front tables before doors open.",
+        storeIds: ["s2", "s3"],
+        required: false,
+        authorId: "u-michael",
+        createdAt: now - 20 * HOUR,
+      },
+      {
+        id: "a6",
+        title: "Updated closing checklist",
+        body: "The closing checklist now includes locking the side receiving door and logging the safe count in the binder. Please follow it starting tonight.",
+        storeIds: ["s4", "s5"],
+        required: true,
+        authorId: "u-michael",
+        createdAt: now - 1 * DAY,
+      },
+    ];
+
+    // confirmations[announcementId][userId] = timestamp
+    const confirmations = {
+      a1: {
+        "u-jordan": now - 2 * DAY + 2 * HOUR,
+        "u-sam": now - 1 * DAY,
+        "u-maria": now - 2 * DAY + 4 * HOUR,
+        "u-chris": now - 1 * DAY - 6 * HOUR,
+        "u-ben": now - 2 * DAY + 1 * HOUR,
+        "u-olivia": now - 2 * DAY + 3 * HOUR,
+        "u-hannah": now - 1 * DAY,
+        "u-jamal": now - 1 * DAY - 2 * HOUR,
+        "u-grace": now - 2 * DAY + 5 * HOUR,
+        "u-sofia": now - 1 * DAY - 1 * HOUR,
+      },
+      a2: {
+        "u-jordan": now - 3 * HOUR,
+      },
+      a6: {
+        "u-emily": now - 18 * HOUR,
+        "u-grace": now - 20 * HOUR,
+        "u-kevin": now - 10 * HOUR,
+      },
+    };
+
+    return { stores, users, announcements, confirmations };
+  }
+
+  /* ---------------- Storage ---------------- */
+
+  function loadData() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {
+      /* fall through to seed */
+    }
+    const seed = buildSeed();
+    saveData(seed);
+    return seed;
+  }
+
+  function saveData(d) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
+    } catch (e) {
+      console.warn("Could not save to localStorage", e);
+    }
+  }
+
+  function loadSession() {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return { role: "ops", employeeId: "u-alex" };
+  }
+
+  function saveSession() {
+    try {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    } catch (e) {}
+  }
+
+  let data = loadData();
+  let session = loadSession();
+
+  /* ---------------- Helpers ---------------- */
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  const userById = (id) => data.users.find((u) => u.id === id);
+  const storeById = (id) => data.stores.find((s) => s.id === id);
+  const storeLabel = (s) => `Store ${s.number} · ${s.name}`;
+
+  function audienceLabel(storeIds) {
+    if (storeIds.length === data.stores.length) return "All stores";
+    return storeIds
+      .map((id) => storeById(id))
+      .filter(Boolean)
+      .sort((a, b) => a.number - b.number)
+      .map((s) => `Store ${s.number}`)
+      .join(", ");
+  }
+
+  function timeAgo(ts) {
+    const diff = Date.now() - ts;
+    const min = Math.round(diff / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min} min ago`;
+    const hrs = Math.round(min / 60);
+    if (hrs < 24) return `${hrs} hr${hrs === 1 ? "" : "s"} ago`;
+    const days = Math.round(hrs / 24);
+    if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+    return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  function isConfirmed(annId, userId) {
+    return Boolean(data.confirmations[annId] && data.confirmations[annId][userId]);
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    const el = $("#toast");
+    el.textContent = msg;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+  }
+
+  /* Who is the current viewer? */
+  function currentUser() {
+    if (session.role === "ops") return userById("u-michael");
+    if (session.role === "store") return userById("u-rachel");
+    return userById(session.employeeId) || userById("u-alex");
+  }
+
+  /* ---------------- Role switcher ---------------- */
+
+  const roleSelect = $("#role-select");
+  const employeeSelect = $("#employee-select");
+
+  function renderEmployeeOptions() {
+    const groups = data.stores
+      .slice()
+      .sort((a, b) => a.number - b.number)
+      .map((s) => {
+        const emps = data.users.filter((u) => u.role === "employee" && u.storeId === s.id);
+        const opts = emps
+          .map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`)
+          .join("");
+        return `<optgroup label="${esc(storeLabel(s))}">${opts}</optgroup>`;
+      })
+      .join("");
+    employeeSelect.innerHTML = groups;
+  }
+
+  function syncSwitcher() {
+    roleSelect.value = session.role;
+    employeeSelect.hidden = session.role !== "employee";
+    employeeSelect.value = session.employeeId;
+  }
+
+  roleSelect.addEventListener("change", () => {
+    session.role = roleSelect.value;
+    saveSession();
+    syncSwitcher();
+    render();
+  });
+
+  employeeSelect.addEventListener("change", () => {
+    session.employeeId = employeeSelect.value;
+    saveSession();
+    render();
+  });
+
+  $("#reset-btn").addEventListener("click", () => {
+    if (!confirm("Reset all announcements and confirmations to the original demo data?")) return;
+    data = buildSeed();
+    saveData(data);
+    renderEmployeeOptions();
+    syncSwitcher();
+    render();
+    toast("Demo data reset");
+  });
+
+  /* ---------------- Manager view ---------------- */
+
+  function renderManager(user) {
+    const isOps = user.role === "ops";
+    const myStore = isOps ? null : storeById(user.storeId);
+    const stores = data.stores.slice().sort((a, b) => a.number - b.number);
+
+    let storePicker;
+    if (isOps) {
+      storePicker = `
+        <div class="store-picks" id="store-picks">
+          <label class="chip all"><input type="checkbox" id="pick-all"> All stores</label>
+          ${stores
+            .map(
+              (s) => `<label class="chip"><input type="checkbox" name="store" value="${esc(s.id)}"> ${esc(storeLabel(s))}</label>`
+            )
+            .join("")}
+        </div>`;
+    } else {
+      storePicker = `
+        <div class="store-picks">
+          <label class="chip"><input type="checkbox" name="store" value="${esc(myStore.id)}" checked disabled> ${esc(storeLabel(myStore))}</label>
+        </div>
+        <div class="hint">Store managers can post to their own store only.</div>`;
+    }
+
+    // Recent posts in this manager's scope
+    const visible = data.announcements
+      .filter((a) => isOps || a.storeIds.includes(user.storeId))
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    const postedHtml = visible.length
+      ? `<ul class="posted-list">${visible
+          .map((a) => {
+            const author = userById(a.authorId);
+            return `<li>
+              <div class="posted-title">${esc(a.title)}${a.required ? '<span class="badge badge-required">Required</span>' : ""}</div>
+              <div class="meta">${esc(audienceLabel(a.storeIds))} · ${esc(author ? author.name.split(" ")[0] : "Unknown")} · ${esc(timeAgo(a.createdAt))}</div>
+            </li>`;
+          })
+          .join("")}</ul>`
+      : `<p class="empty">No announcements yet.</p>`;
+
+    return `
+      <div class="page-head">
+        <h1>Post an announcement</h1>
+        <p>${esc(user.name.split(" ")[0])} · ${isOps ? "Operations Manager · All stores" : `Store Manager · ${esc(storeLabel(myStore))}`}</p>
+      </div>
+      <div class="manager-grid">
+        <section class="card">
+          <h2>New announcement</h2>
+          <form id="post-form" novalidate>
+            <div class="field">
+              <label for="f-title">Title</label>
+              <input type="text" id="f-title" maxlength="120" placeholder="e.g. Store opens late Sunday" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="f-body">Message</label>
+              <textarea id="f-body" maxlength="2000" placeholder="Keep it short — staff will read this on their phone."></textarea>
+            </div>
+            <div class="field">
+              <span class="label">Send to</span>
+              ${storePicker}
+            </div>
+            <div class="field">
+              <label class="toggle-row" for="f-required">
+                <span class="switch">
+                  <input type="checkbox" id="f-required">
+                  <span class="track"></span>
+                </span>
+                <span>
+                  <strong>Required — employees must confirm</strong>
+                  <span>Pinned to the top of their feed with a "Got it" button until they confirm.</span>
+                </span>
+              </label>
+            </div>
+            <p class="form-error" id="form-error" hidden></p>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">Post announcement</button>
+            </div>
+          </form>
+        </section>
+        <section class="card">
+          <h2>${isOps ? "Recent announcements" : "Recent announcements at your store"}</h2>
+          ${postedHtml}
+        </section>
+      </div>`;
+  }
+
+  function bindManager(user) {
+    const isOps = user.role === "ops";
+    const form = $("#post-form");
+    const errorEl = $("#form-error");
+
+    if (isOps) {
+      const allBox = $("#pick-all");
+      const storeBoxes = [...form.querySelectorAll('input[name="store"]')];
+      allBox.addEventListener("change", () => {
+        storeBoxes.forEach((b) => (b.checked = allBox.checked));
+      });
+      storeBoxes.forEach((b) =>
+        b.addEventListener("change", () => {
+          allBox.checked = storeBoxes.every((x) => x.checked);
+        })
+      );
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const title = $("#f-title").value.trim();
+      const body = $("#f-body").value.trim();
+      const required = $("#f-required").checked;
+
+      // Never trust the form for store scope: enforce by role.
+      const storeIds = isOps
+        ? [...form.querySelectorAll('input[name="store"]:checked')].map((b) => b.value)
+        : [user.storeId];
+
+      const problems = [];
+      if (!title) problems.push("a title");
+      if (!body) problems.push("a message");
+      if (!storeIds.length) problems.push("at least one store");
+      if (problems.length) {
+        errorEl.textContent = `Please add ${problems.join(", ")}.`;
+        errorEl.hidden = false;
+        return;
+      }
+
+      data.announcements.push({
+        id: "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title,
+        body,
+        storeIds,
+        required,
+        authorId: user.id,
+        createdAt: Date.now(),
+      });
+      saveData(data);
+      render();
+      toast(`Posted to ${audienceLabel(storeIds)}${required ? " · confirmation required" : ""}`);
+    });
+  }
+
+  /* ---------------- Employee view ---------------- */
+
+  function postCard(a, { pinned, confirmedAt }) {
+    const author = userById(a.authorId);
+    const authorLine = author
+      ? `${author.name.split(" ")[0]} · ${author.role === "ops" ? "Operations" : "Store Manager"}`
+      : "Management";
+    return `
+      <article class="post${pinned ? " pinned" : ""}">
+        <h3>${esc(a.title)}${a.required && !pinned && confirmedAt ? '<span class="badge badge-ok">✓ Confirmed</span>' : ""}</h3>
+        <div class="meta">${esc(authorLine)} · ${esc(timeAgo(a.createdAt))}</div>
+        <p>${esc(a.body)}</p>
+        ${pinned ? `<button type="button" class="got-it" data-confirm="${esc(a.id)}">Got it</button>` : ""}
+        ${confirmedAt ? `<div class="confirmed-note">You confirmed ${esc(timeAgo(confirmedAt))}</div>` : ""}
+      </article>`;
+  }
+
+  function renderEmployee(user) {
+    const store = storeById(user.storeId);
+    const mine = data.announcements
+      .filter((a) => a.storeIds.includes(user.storeId))
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    const pending = mine.filter((a) => a.required && !isConfirmed(a.id, user.id));
+    const rest = mine.filter((a) => !(a.required && !isConfirmed(a.id, user.id)));
+
+    const pendingHtml = pending.length
+      ? `<div class="section-label required">Needs your confirmation (${pending.length})</div>
+         ${pending.map((a) => postCard(a, { pinned: true })).join("")}`
+      : `<div class="all-clear">✓ You're all caught up on required announcements.</div>`;
+
+    const restHtml = rest.length
+      ? rest
+          .map((a) =>
+            postCard(a, {
+              pinned: false,
+              confirmedAt: a.required ? data.confirmations[a.id][user.id] : null,
+            })
+          )
+          .join("")
+      : `<p class="empty">No other announcements yet.</p>`;
+
+    return `
+      <div class="feed">
+        <div class="feed-greeting">
+          <h1>Hi, ${esc(user.name.split(" ")[0])}</h1>
+          <p>${esc(storeLabel(store))}</p>
+        </div>
+        ${pendingHtml}
+        <div class="section-label">Announcements</div>
+        ${restHtml}
+      </div>`;
+  }
+
+  function bindEmployee(user) {
+    $("#app").addEventListener("click", onConfirmClick);
+
+    function onConfirmClick(e) {
+      const btn = e.target.closest("[data-confirm]");
+      if (!btn) return;
+      const id = btn.getAttribute("data-confirm");
+      const ann = data.announcements.find((a) => a.id === id);
+      if (!ann || !ann.storeIds.includes(user.storeId)) return;
+      data.confirmations[id] = data.confirmations[id] || {};
+      data.confirmations[id][user.id] = Date.now();
+      saveData(data);
+      render();
+      toast("Thanks — confirmed");
+    }
+
+    // Remove the listener on the next render so it doesn't stack.
+    cleanup = () => $("#app").removeEventListener("click", onConfirmClick);
+  }
+
+  /* ---------------- Render ---------------- */
+
+  let cleanup = null;
+
+  function render() {
+    if (cleanup) {
+      cleanup();
+      cleanup = null;
+    }
+    const app = $("#app");
+    const user = currentUser();
+    if (user.role === "employee") {
+      app.innerHTML = renderEmployee(user);
+      bindEmployee(user);
+    } else {
+      app.innerHTML = renderManager(user);
+      bindManager(user);
+    }
+    window.scrollTo(0, 0);
+  }
+
+  renderEmployeeOptions();
+  syncSwitcher();
+  render();
+})();
