@@ -4,8 +4,9 @@
 (function () {
   "use strict";
 
-  // v2: adds reminders + employee joinedAt. Older saved data is replaced by the new seed.
-  const STORAGE_KEY = "summit-updates:data:v2";
+  // Bump when the seed changes so browsers pick up the new demo data (older saved data is replaced).
+  // v3: optional dueAt on required announcements. v4: Store 1 overdue demo.
+  const STORAGE_KEY = "summit-updates:data:v4";
   const SESSION_KEY = "summit-updates:session:v1";
 
   // Stores below this confirmation rate are highlighted for the Ops Manager.
@@ -15,6 +16,13 @@
 
   const HOUR = 60 * 60 * 1000;
   const DAY = 24 * HOUR;
+
+  /* "Confirm by" dates are whole days: due at the end of that day, local time. */
+  function endOfDay(ts) {
+    const d = new Date(ts);
+    d.setHours(23, 59, 59, 999);
+    return d.getTime();
+  }
 
   function buildSeed() {
     const now = Date.now();
@@ -72,6 +80,8 @@
           "Receipts are still required for all refunds. Ask your store manager if you're unsure how the override works.",
         storeIds: ALL,
         required: true,
+        // Due 2 days ago → Store 1's Alex, Sam (and new hire Taylor) show as Overdue.
+        dueAt: endOfDay(now - 2 * DAY),
         authorId: "u-michael",
         createdAt: now - 2 * DAY,
       },
@@ -83,6 +93,7 @@
           "Please move any boxes to the stockroom before end of shift Wednesday.",
         storeIds: ["s1"],
         required: true,
+        dueAt: endOfDay(now + 2 * DAY),
         authorId: "u-rachel",
         createdAt: now - 5 * HOUR,
       },
@@ -125,11 +136,10 @@
     ];
 
     // confirmations[announcementId][userId] = timestamp
-    // a1 by store: S1 2/4 (50%), S2 3/3 (100%), S3 4/4 (100%), S4 1/3 (33%), S5 2/4 (50%)
+    // a1 by store: S1 1/4 (25%), S2 3/3 (100%), S3 4/4 (100%), S4 1/3 (33%), S5 2/4 (50%)
     const confirmations = {
       a1: {
         "u-jordan": now - 2 * DAY + 2 * HOUR,
-        "u-sam": now - 1 * DAY,
         "u-maria": now - 2 * DAY + 4 * HOUR,
         "u-chris": now - 1 * DAY - 6 * HOUR,
         "u-aisha": now - 1 * DAY - 2 * HOUR,
@@ -268,6 +278,48 @@
     return (data.reminders[annId] && data.reminders[annId][userId]) || null;
   }
 
+  const isPastDue = (ann) => Boolean(ann.dueAt) && Date.now() > ann.dueAt;
+  const isOverdue = (ann, userId) => isPastDue(ann) && !confirmedAt(ann.id, userId);
+
+  function formatDay(ts) {
+    return new Date(ts).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  /* yyyy-mm-dd for <input type="date">, in local time. */
+  function dateInputValue(ts) {
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function parseDateInput(value) {
+    const [y, m, d] = value.split("-").map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+  }
+
+  /* Required posts sent to a store in the last 7 days (for the "don't overuse Required" nudge). */
+  function recentRequiredCount(storeId) {
+    const since = Date.now() - 7 * DAY;
+    return data.announcements.filter(
+      (a) => a.required && a.createdAt >= since && a.storeIds.includes(storeId)
+    ).length;
+  }
+
+  function nudgeCountHtml(storeIds) {
+    const stores = storeIds.map(storeById).filter(Boolean).sort((a, b) => a.number - b.number);
+    if (!stores.length) return "";
+    const posts = (n) => `${n} Required post${n === 1 ? "" : "s"}`;
+    if (stores.length === 1) {
+      const n = recentRequiredCount(stores[0].id);
+      return n
+        ? `Store ${stores[0].number} has had <strong>${posts(n)}</strong> this week.`
+        : `Store ${stores[0].number} hasn't had any Required posts this week.`;
+    }
+    const parts = stores.map((s) => `Store ${s.number}: <strong>${recentRequiredCount(s.id)}</strong>`);
+    return `Required posts in the last 7 days — ${parts.join(", ")}.`;
+  }
+
   let toastTimer;
   function toast(msg) {
     const el = $("#toast");
@@ -301,7 +353,8 @@
     const pending = people.filter((u) => !confirmedAt(ann.id, u.id)).sort(byName);
     const total = people.length;
     const rate = total ? confirmed.length / total : 1;
-    return { total, confirmed, pending, rate };
+    const overdue = isPastDue(ann) ? pending.length : 0;
+    return { total, confirmed, pending, rate, overdue };
   }
 
   /* Store IDs of an announcement that this manager is allowed to track. */
@@ -475,6 +528,15 @@
                   <span>Pinned to the top of their feed with a "Got it" button until they confirm.</span>
                 </span>
               </label>
+              <div class="nudge" id="required-nudge" hidden>
+                <p><span class="nudge-label"><span aria-hidden="true">💡</span> Hint:</span> Use Required for safety and policy updates only, so your team doesn't tune them out.</p>
+                <p id="nudge-count"></p>
+              </div>
+            </div>
+            <div class="field" id="due-field" hidden>
+              <label for="f-due">Confirm by <span class="optional">(optional)</span></label>
+              <input type="date" id="f-due" min="${dateInputValue(Date.now())}">
+              <div class="hint">Anyone who hasn't confirmed by the end of this day is marked Overdue.</div>
             </div>
             <p class="form-error" id="form-error" hidden></p>
             <div class="form-actions">
@@ -507,15 +569,24 @@
 
     const body = isOps ? storeBreakdown(ann, storeIds) : peopleLists(ann, s);
 
+    let due = "";
+    if (ann.dueAt) {
+      due = isPastDue(ann)
+        ? `<div class="due-line is-overdue">Was due ${esc(formatDay(ann.dueAt))}</div>`
+        : `<div class="due-line">Confirm by ${esc(formatDay(ann.dueAt))}</div>`;
+    }
+
     return `
       <section class="card track-card">
         <div class="track-head">
           <div>
             <h2>${esc(ann.title)}</h2>
             <div class="meta">${esc(audienceLabel(ann.storeIds))} · Posted by ${esc(author ? firstName(author) : "Unknown")} · ${esc(formatDateTime(ann.createdAt))}</div>
+            ${due}
           </div>
           <div class="track-summary ${rateClass(s.rate)}">
             <strong>${s.confirmed.length} of ${s.total}</strong> confirmed
+            ${s.overdue ? `<div class="overdue-count">${s.overdue} overdue</div>` : ""}
           </div>
         </div>
         ${progressBar(s.rate)}
@@ -537,7 +608,9 @@
           <li class="store-item${low ? " is-low" : ""}">
             <button type="button" class="store-row" data-action="toggle-store" data-key="${esc(key)}"
               aria-expanded="${open}">
-              <span class="store-name">${esc(storeLabel(store))}</span>
+              <span class="store-name"><span class="store-name-text">${esc(storeLabel(store))}</span>${
+                s.overdue ? `<span class="overdue-pill">${s.overdue} overdue</span>` : ""
+              }</span>
               <span class="store-bar">${s.total ? progressBar(s.rate, "progress-sm") : ""}</span>
               <span class="store-count">${s.confirmed.length}/${s.total}</span>
               <span class="store-pct">${s.total ? pct(s.rate) : "—"}</span>
@@ -565,6 +638,7 @@
               <li class="person">
                 <div class="person-main">
                   <span class="person-name">${esc(u.name)}</span>
+                  ${isOverdue(ann, u.id) ? '<span class="tag tag-overdue">Overdue</span>' : ""}
                   ${isNew ? '<span class="tag">Joined after this was posted</span>' : ""}
                   ${reminded ? `<div class="person-sub reminded">Reminder sent · ${esc(formatDateTime(reminded))}</div>` : ""}
                 </div>
@@ -607,16 +681,33 @@
     if (!form) return;
     const isOps = user.role === "ops";
     const errorEl = $("#form-error");
+    const requiredBox = $("#f-required");
+
+    // Never trust the form for store scope: enforce by role.
+    const selectedStoreIds = () =>
+      isOps
+        ? [...form.querySelectorAll('input[name="store"]:checked')].map((b) => b.value)
+        : [user.storeId];
+
+    function updateRequiredUI() {
+      const on = requiredBox.checked;
+      $("#required-nudge").hidden = !on;
+      $("#due-field").hidden = !on;
+      if (on) $("#nudge-count").innerHTML = nudgeCountHtml(selectedStoreIds());
+    }
+    requiredBox.addEventListener("change", updateRequiredUI);
 
     if (isOps) {
       const allBox = $("#pick-all");
       const storeBoxes = [...form.querySelectorAll('input[name="store"]')];
       allBox.addEventListener("change", () => {
         storeBoxes.forEach((b) => (b.checked = allBox.checked));
+        updateRequiredUI();
       });
       storeBoxes.forEach((b) =>
         b.addEventListener("change", () => {
           allBox.checked = storeBoxes.every((x) => x.checked);
+          updateRequiredUI();
         })
       );
     }
@@ -625,12 +716,10 @@
       e.preventDefault();
       const title = $("#f-title").value.trim();
       const body = $("#f-body").value.trim();
-      const required = $("#f-required").checked;
-
-      // Never trust the form for store scope: enforce by role.
-      const storeIds = isOps
-        ? [...form.querySelectorAll('input[name="store"]:checked')].map((b) => b.value)
-        : [user.storeId];
+      const required = requiredBox.checked;
+      const dueValue = $("#f-due").value;
+      const dueAt = required && dueValue ? parseDateInput(dueValue) : null;
+      const storeIds = selectedStoreIds();
 
       const problems = [];
       if (!title) problems.push("a title");
@@ -641,8 +730,13 @@
         errorEl.hidden = false;
         return;
       }
+      if (required && dueValue && (!dueAt || dueAt < Date.now())) {
+        errorEl.textContent = "The Confirm by date can't be in the past.";
+        errorEl.hidden = false;
+        return;
+      }
 
-      data.announcements.push({
+      const ann = {
         id: "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         title,
         body,
@@ -650,10 +744,15 @@
         required,
         authorId: user.id,
         createdAt: Date.now(),
-      });
+      };
+      if (dueAt) ann.dueAt = dueAt;
+      data.announcements.push(ann);
       saveData(data);
       render();
-      toast(`Posted to ${audienceLabel(storeIds)}${required ? " · confirmation required" : ""}`);
+      toast(
+        `Posted to ${audienceLabel(storeIds)}` +
+          (required ? ` · confirmation required${dueAt ? ` by ${formatDay(dueAt)}` : ""}` : "")
+      );
     });
   }
 
@@ -668,6 +767,13 @@
       <article class="post${pinned ? " pinned" : ""}">
         <h3>${esc(a.title)}${confirmedTs ? '<span class="badge badge-ok">✓ Confirmed</span>' : ""}</h3>
         <div class="meta">${esc(authorLine)} · ${esc(timeAgo(a.createdAt))}</div>
+        ${
+          pinned && a.dueAt
+            ? isPastDue(a)
+              ? `<div class="due-pill is-overdue">Overdue · was due ${esc(formatDay(a.dueAt))}</div>`
+              : `<div class="due-pill">Confirm by ${esc(formatDay(a.dueAt))}</div>`
+            : ""
+        }
         <p>${esc(a.body)}</p>
         ${pinned ? `<button type="button" class="got-it" data-action="confirm" data-ann="${esc(a.id)}">Got it</button>` : ""}
         ${confirmedTs ? `<div class="confirmed-note">You confirmed ${esc(timeAgo(confirmedTs))}</div>` : ""}
