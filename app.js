@@ -12,8 +12,6 @@
   // Stores below this confirmation rate are highlighted for the Ops Manager.
   const TARGET_RATE = 0.8;
 
-  /* ---------------- Seed data ---------------- */
-
   const HOUR = 60 * 60 * 1000;
   const DAY = 24 * HOUR;
 
@@ -23,6 +21,8 @@
     d.setHours(23, 59, 59, 999);
     return d.getTime();
   }
+
+  /* ---------------- Seed data ---------------- */
 
   function buildSeed() {
     const now = Date.now();
@@ -80,7 +80,7 @@
           "Receipts are still required for all refunds. Ask your store manager if you're unsure how the override works.",
         storeIds: ALL,
         required: true,
-        // Due 2 days ago → Store 1's Alex, Sam (and new hire Taylor) show as Overdue.
+        // Due 2 days ago → Store 1's Alex and Sam show as Overdue.
         dueAt: endOfDay(now - 2 * DAY),
         authorId: "u-michael",
         createdAt: now - 2 * DAY,
@@ -172,17 +172,27 @@
 
   /* ---------------- Storage ---------------- */
 
+  function isValidData(d) {
+    return (
+      d && Array.isArray(d.stores) && d.stores.length &&
+      Array.isArray(d.users) && Array.isArray(d.announcements) &&
+      d.users.some((u) => u.id === "u-michael") && d.users.some((u) => u.id === "u-rachel")
+    );
+  }
+
   function loadData() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const d = JSON.parse(raw);
-        d.confirmations = d.confirmations || {};
-        d.reminders = d.reminders || {};
-        return d;
+        if (isValidData(d)) {
+          d.confirmations = d.confirmations || {};
+          d.reminders = d.reminders || {};
+          return d;
+        }
       }
     } catch (e) {
-      /* fall through to seed */
+      /* corrupt or unavailable storage: fall through to seed */
     }
     const seed = buildSeed();
     saveData(seed);
@@ -197,13 +207,18 @@
     }
   }
 
+  const ROLES = ["ops", "store", "employee"];
+  const TABS = ["post", "tracking", "team"];
+
   function loadSession() {
-    const fallback = { role: "ops", employeeId: "u-alex", managerTab: "post" };
+    const s = { role: "ops", employeeId: "u-alex", managerTab: "post" };
     try {
       const raw = localStorage.getItem(SESSION_KEY);
-      if (raw) return Object.assign(fallback, JSON.parse(raw));
+      if (raw) Object.assign(s, JSON.parse(raw));
     } catch (e) {}
-    return fallback;
+    if (!ROLES.includes(s.role)) s.role = "ops";
+    if (!TABS.includes(s.managerTab)) s.managerTab = "post";
+    return s;
   }
 
   function saveSession() {
@@ -215,8 +230,13 @@
   let data = loadData();
   let session = loadSession();
 
-  // In-memory UI state (not persisted): which Ops store rows are expanded, keyed "annId:storeId".
-  const openStores = new Set();
+  /* In-memory UI state (not persisted). */
+  const ui = {
+    openStores: new Set(), // Ops store rows expanded, keyed "annId:storeId"
+    pendingDeleteId: null, // announcement showing the in-page "Are you sure?" bar
+    lastAddedId: null, // employee just added (shows the success banner on the Team tab)
+    drafts: {}, // unsent post-form contents per manager, so re-renders don't wipe typing
+  };
 
   /* ---------------- Helpers ---------------- */
 
@@ -237,6 +257,7 @@
   const firstName = (u) => u.name.split(" ")[0];
   const sortedStores = () => data.stores.slice().sort((a, b) => a.number - b.number);
   const byName = (a, b) => a.name.localeCompare(b.name);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
   function audienceLabel(storeIds) {
     if (storeIds.length === data.stores.length) return "All stores";
@@ -270,17 +291,6 @@
     return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
   }
 
-  function confirmedAt(annId, userId) {
-    return (data.confirmations[annId] && data.confirmations[annId][userId]) || null;
-  }
-
-  function remindedAt(annId, userId) {
-    return (data.reminders[annId] && data.reminders[annId][userId]) || null;
-  }
-
-  const isPastDue = (ann) => Boolean(ann.dueAt) && Date.now() > ann.dueAt;
-  const isOverdue = (ann, userId) => isPastDue(ann) && !confirmedAt(ann.id, userId);
-
   function formatDay(ts) {
     return new Date(ts).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   }
@@ -293,32 +303,23 @@
   }
 
   function parseDateInput(value) {
-    const [y, m, d] = value.split("-").map(Number);
+    const [y, m, d] = String(value).split("-").map(Number);
     if (!y || !m || !d) return null;
     return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
   }
 
-  /* Required posts sent to a store in the last 7 days (for the "don't overuse Required" nudge). */
-  function recentRequiredCount(storeId) {
-    const since = Date.now() - 7 * DAY;
-    return data.announcements.filter(
-      (a) => a.required && a.createdAt >= since && a.storeIds.includes(storeId)
-    ).length;
+  function confirmedAt(annId, userId) {
+    return (data.confirmations[annId] && data.confirmations[annId][userId]) || null;
   }
 
-  function nudgeCountHtml(storeIds) {
-    const stores = storeIds.map(storeById).filter(Boolean).sort((a, b) => a.number - b.number);
-    if (!stores.length) return "";
-    const posts = (n) => `${n} Required post${n === 1 ? "" : "s"}`;
-    if (stores.length === 1) {
-      const n = recentRequiredCount(stores[0].id);
-      return n
-        ? `Store ${stores[0].number} has had <strong>${posts(n)}</strong> this week.`
-        : `Store ${stores[0].number} hasn't had any Required posts this week.`;
-    }
-    const parts = stores.map((s) => `Store ${s.number}: <strong>${recentRequiredCount(s.id)}</strong>`);
-    return `Required posts in the last 7 days — ${parts.join(", ")}.`;
+  function remindedAt(annId, userId) {
+    return (data.reminders[annId] && data.reminders[annId][userId]) || null;
   }
+
+  const isPastDue = (ann) => Boolean(ann.dueAt) && Date.now() > ann.dueAt;
+  const joinedAfterDue = (ann, u) => Boolean(ann.dueAt && u.joinedAt && u.joinedAt > ann.dueAt);
+  // Someone who joined after the deadline can't have missed it: they still need to confirm, but aren't "Overdue".
+  const isOverdue = (ann, u) => isPastDue(ann) && !confirmedAt(ann.id, u.id) && !joinedAfterDue(ann, u);
 
   let toastTimer;
   function toast(msg) {
@@ -326,7 +327,7 @@
     el.textContent = msg;
     el.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove("show"), 2400);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
   }
 
   /* Who is the current viewer? */
@@ -335,6 +336,8 @@
     if (session.role === "store") return userById("u-rachel");
     return userById(session.employeeId) || userById("u-alex");
   }
+
+  const canDelete = (ann, user) => user.role === "ops" || ann.authorId === user.id;
 
   /* ---------------- Confirmation stats ----------------
    * Y (the denominator) is everyone *currently* employed at the store, regardless of when
@@ -352,8 +355,8 @@
       .sort((a, b) => confirmedAt(ann.id, b.id) - confirmedAt(ann.id, a.id));
     const pending = people.filter((u) => !confirmedAt(ann.id, u.id)).sort(byName);
     const total = people.length;
-    const rate = total ? confirmed.length / total : 1;
-    const overdue = isPastDue(ann) ? pending.length : 0;
+    const rate = total ? confirmed.length / total : 0;
+    const overdue = pending.filter((u) => isOverdue(ann, u)).length;
     return { total, confirmed, pending, rate, overdue };
   }
 
@@ -367,6 +370,27 @@
     return data.announcements
       .filter((a) => a.required && trackedStoreIds(a, user).length)
       .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /* Required posts sent to a store in the last 7 days (for the "don't overuse Required" nudge). */
+  function recentRequiredCount(storeId) {
+    const since = Date.now() - 7 * DAY;
+    return data.announcements.filter(
+      (a) => a.required && a.createdAt >= since && a.storeIds.includes(storeId)
+    ).length;
+  }
+
+  function nudgeCountHtml(storeIds) {
+    const stores = storeIds.map(storeById).filter(Boolean).sort((a, b) => a.number - b.number);
+    if (!stores.length) return "";
+    if (stores.length === 1) {
+      const n = recentRequiredCount(stores[0].id);
+      return n
+        ? `Store ${stores[0].number} has had <strong>${plural(n, "Required post")}</strong> this week.`
+        : `Store ${stores[0].number} hasn't had any Required posts this week.`;
+    }
+    const parts = stores.map((s) => `Store ${s.number}: <strong>${recentRequiredCount(s.id)}</strong>`);
+    return `Required posts in the last 7 days — ${parts.join(", ")}.`;
   }
 
   const pct = (rate) => `${Math.round(rate * 100)}%`;
@@ -383,7 +407,39 @@
       <span style="width:${(rate * 100).toFixed(1)}%"></span></div>`;
   }
 
-  /* ---------------- Role switcher ---------------- */
+  /* ---------------- Inline field errors ---------------- */
+
+  function showFieldErrors(form, errors) {
+    form.querySelectorAll("[data-error-for]").forEach((el) => {
+      const key = el.getAttribute("data-error-for");
+      const msg = errors[key];
+      el.textContent = msg || "";
+      el.hidden = !msg;
+      const control = form.querySelector(`[data-field="${key}"]`);
+      if (control) {
+        control.classList.toggle("invalid", Boolean(msg));
+        if (msg) control.setAttribute("aria-invalid", "true");
+        else control.removeAttribute("aria-invalid");
+      }
+    });
+    const firstKey = Object.keys(errors)[0];
+    if (firstKey) {
+      const control = form.querySelector(`[data-field="${firstKey}"]`);
+      const focusable = control && (control.matches("input, textarea, select") ? control : control.querySelector("input:not(:disabled)"));
+      if (focusable) focusable.focus();
+    }
+  }
+
+  function clearFieldError(form, key) {
+    const el = form.querySelector(`[data-error-for="${key}"]`);
+    const control = form.querySelector(`[data-field="${key}"]`);
+    if (el) { el.hidden = true; el.textContent = ""; }
+    if (control) { control.classList.remove("invalid"); control.removeAttribute("aria-invalid"); }
+  }
+
+  const errorSlot = (key) => `<div class="field-error" id="err-${key}" data-error-for="${key}" role="alert" hidden></div>`;
+
+  /* ---------------- Role switcher + reset ---------------- */
 
   const roleSelect = $("#role-select");
   const employeeSelect = $("#employee-select");
@@ -392,22 +448,35 @@
     employeeSelect.innerHTML = sortedStores()
       .map((s) => {
         const opts = employeesAt(s.id)
+          .sort(byName)
           .map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`)
           .join("");
-        return `<optgroup label="${esc(storeLabel(s))}">${opts}</optgroup>`;
+        return opts ? `<optgroup label="${esc(storeLabel(s))}">${opts}</optgroup>` : "";
       })
       .join("");
   }
 
   function syncSwitcher() {
+    // A saved employee may no longer exist (e.g. an added employee after a reset).
+    const emp = userById(session.employeeId);
+    if (!emp || emp.role !== "employee") {
+      session.employeeId = "u-alex";
+      saveSession();
+    }
     roleSelect.value = session.role;
     employeeSelect.hidden = session.role !== "employee";
     employeeSelect.value = session.employeeId;
   }
 
+  function resetTransientUI() {
+    ui.pendingDeleteId = null;
+    ui.lastAddedId = null;
+  }
+
   roleSelect.addEventListener("change", () => {
     session.role = roleSelect.value;
     saveSession();
+    resetTransientUI();
     syncSwitcher();
     render({ scrollTop: true });
   });
@@ -418,15 +487,39 @@
     render({ scrollTop: true });
   });
 
-  $("#reset-btn").addEventListener("click", () => {
-    if (!confirm("Reset all announcements, confirmations and reminders to the original demo data?")) return;
+  // Reset uses an in-page confirm rather than a browser popup.
+  const resetBtn = $("#reset-btn");
+  const resetConfirm = $("#reset-confirm");
+  function showResetConfirm(show) {
+    resetBtn.hidden = show;
+    resetConfirm.hidden = !show;
+    if (show) $("#reset-no").focus();
+  }
+  resetBtn.addEventListener("click", () => showResetConfirm(true));
+  $("#reset-no").addEventListener("click", () => {
+    showResetConfirm(false);
+    resetBtn.focus();
+  });
+  $("#reset-yes").addEventListener("click", () => {
     data = buildSeed();
     saveData(data);
-    openStores.clear();
+    ui.openStores.clear();
+    ui.drafts = {};
+    resetTransientUI();
     renderEmployeeOptions();
     syncSwitcher();
+    showResetConfirm(false);
     render({ scrollTop: true });
     toast("Demo data reset");
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!resetConfirm.hidden) showResetConfirm(false);
+    if (ui.pendingDeleteId) {
+      ui.pendingDeleteId = null;
+      render();
+    }
   });
 
   /* ---------------- Manager view ---------------- */
@@ -434,11 +527,21 @@
   function renderManager(user) {
     const isOps = user.role === "ops";
     const myStore = isOps ? null : storeById(user.storeId);
-    const tab = session.managerTab === "tracking" ? "tracking" : "post";
+    const tab = session.managerTab;
 
-    const openCount = requiredForManager(user).filter(
-      (a) => statsFor(a, trackedStoreIds(a, user)).rate < 1
-    ).length;
+    const openCount = requiredForManager(user).filter((a) => {
+      const s = statsFor(a, trackedStoreIds(a, user));
+      return s.total && s.rate < 1;
+    }).length;
+
+    const tabBtn = (id, label, extra = "") => `
+      <button type="button" role="tab" class="tab" data-action="tab" data-tab="${id}"
+        aria-selected="${tab === id}">${label}${extra}</button>`;
+
+    let body;
+    if (tab === "tracking") body = renderTrackingTab(user);
+    else if (tab === "team") body = renderTeamTab(user);
+    else body = renderPostTab(user);
 
     return `
       <div class="page-head">
@@ -446,28 +549,60 @@
         <p>${esc(firstName(user))} · ${isOps ? "Operations Manager · All stores" : `Store Manager · ${esc(storeLabel(myStore))}`}</p>
       </div>
       <nav class="tabs" role="tablist">
-        <button type="button" role="tab" class="tab" data-action="tab" data-tab="post"
-          aria-selected="${tab === "post"}">Post</button>
-        <button type="button" role="tab" class="tab" data-action="tab" data-tab="tracking"
-          aria-selected="${tab === "tracking"}">Confirmations${
-            openCount ? ` <span class="tab-count">${openCount}</span>` : ""
-          }</button>
+        ${tabBtn("post", "Post")}
+        ${tabBtn("tracking", "Confirmations", openCount ? ` <span class="tab-count">${openCount}</span>` : "")}
+        ${tabBtn("team", "Team")}
       </nav>
-      ${tab === "post" ? renderPostTab(user) : renderTrackingTab(user)}`;
+      ${body}`;
+  }
+
+  function deleteButton(ann, user) {
+    if (!canDelete(ann, user) || ui.pendingDeleteId === ann.id) return "";
+    return `<button type="button" class="btn-text danger" data-action="ask-delete" data-ann="${esc(ann.id)}"
+      aria-label="Delete “${esc(ann.title)}”">Delete</button>`;
+  }
+
+  function confirmDeleteBar(ann) {
+    if (ui.pendingDeleteId !== ann.id) return "";
+    const confirmations = Object.keys(data.confirmations[ann.id] || {}).length;
+    const loses = ann.required && confirmations
+      ? ` and its confirmation history (${plural(confirmations, "confirmation")}) will be lost`
+      : "";
+    return `
+      <div class="confirm-bar" role="alertdialog" aria-label="Confirm delete">
+        <p><strong>Delete this announcement?</strong> It will disappear from employees' feeds${loses}. This can't be undone.</p>
+        <div class="confirm-actions">
+          <button type="button" class="btn-secondary btn-sm" data-action="cancel-delete" data-autofocus>Cancel</button>
+          <button type="button" class="btn-danger btn-sm" data-action="do-delete" data-ann="${esc(ann.id)}">Yes, delete</button>
+        </div>
+      </div>`;
+  }
+
+  /* ----- Post tab ----- */
+
+  function getDraft(user) {
+    if (!ui.drafts[user.id]) {
+      ui.drafts[user.id] = { title: "", body: "", stores: [], required: false, due: "" };
+    }
+    return ui.drafts[user.id];
   }
 
   function renderPostTab(user) {
     const isOps = user.role === "ops";
     const myStore = isOps ? null : storeById(user.storeId);
+    const d = getDraft(user);
+    const allChecked = isOps && data.stores.every((s) => d.stores.includes(s.id));
 
     let storePicker;
     if (isOps) {
       storePicker = `
-        <div class="store-picks" id="store-picks">
-          <label class="chip all"><input type="checkbox" id="pick-all"> All stores</label>
+        <div class="store-picks" data-field="stores" aria-describedby="err-stores">
+          <label class="chip all"><input type="checkbox" id="pick-all"${allChecked ? " checked" : ""}> All stores</label>
           ${sortedStores()
             .map(
-              (s) => `<label class="chip"><input type="checkbox" name="store" value="${esc(s.id)}"> ${esc(storeLabel(s))}</label>`
+              (s) => `<label class="chip"><input type="checkbox" name="store" value="${esc(s.id)}"${
+                d.stores.includes(s.id) ? " checked" : ""
+              }> ${esc(storeLabel(s))}</label>`
             )
             .join("")}
         </div>`;
@@ -478,6 +613,8 @@
         </div>
         <div class="hint">Store managers can post to their own store only.</div>`;
     }
+
+    const selectedIds = isOps ? d.stores : [user.storeId];
 
     const visible = data.announcements
       .filter((a) => isOps || a.storeIds.includes(user.storeId))
@@ -493,12 +630,22 @@
               progress = ` · <button type="button" class="link-btn" data-action="tab" data-tab="tracking">${s.confirmed.length} of ${s.total} confirmed</button>`;
             }
             return `<li>
-              <div class="posted-title">${esc(a.title)}${a.required ? '<span class="badge badge-required">Required</span>' : ""}</div>
-              <div class="meta">${esc(audienceLabel(a.storeIds))} · ${esc(author ? firstName(author) : "Unknown")} · ${esc(timeAgo(a.createdAt))}${progress}</div>
+              <div class="posted-row">
+                <div class="posted-main">
+                  <div class="posted-title">${esc(a.title)}${a.required ? '<span class="badge badge-required">Required</span>' : ""}</div>
+                  <div class="meta">${esc(audienceLabel(a.storeIds))} · ${esc(author ? firstName(author) : "Unknown")} · ${esc(timeAgo(a.createdAt))}${progress}</div>
+                </div>
+                ${deleteButton(a, user)}
+              </div>
+              ${confirmDeleteBar(a)}
             </li>`;
           })
           .join("")}</ul>`
-      : `<p class="empty">No announcements yet.</p>`;
+      : `<div class="empty-state">
+           <div class="empty-icon" aria-hidden="true">📣</div>
+           <p><strong>No announcements yet</strong></p>
+           <p>Your first post will show up here.</p>
+         </div>`;
 
     return `
       <div class="manager-grid">
@@ -507,38 +654,44 @@
           <form id="post-form" novalidate>
             <div class="field">
               <label for="f-title">Title</label>
-              <input type="text" id="f-title" maxlength="120" placeholder="e.g. Store opens late Sunday" autocomplete="off">
+              <input type="text" id="f-title" data-field="title" maxlength="120" value="${esc(d.title)}"
+                placeholder="e.g. Store opens late Sunday" autocomplete="off" aria-describedby="err-title">
+              ${errorSlot("title")}
             </div>
             <div class="field">
               <label for="f-body">Message</label>
-              <textarea id="f-body" maxlength="2000" placeholder="Keep it short — staff will read this on their phone."></textarea>
+              <textarea id="f-body" data-field="body" maxlength="2000" aria-describedby="err-body"
+                placeholder="Keep it short — staff will read this on their phone.">${esc(d.body)}</textarea>
+              ${errorSlot("body")}
             </div>
             <div class="field">
               <span class="label">Send to</span>
               ${storePicker}
+              ${errorSlot("stores")}
             </div>
             <div class="field">
               <label class="toggle-row" for="f-required">
                 <span class="switch">
-                  <input type="checkbox" id="f-required">
+                  <input type="checkbox" id="f-required"${d.required ? " checked" : ""}>
                   <span class="track"></span>
                 </span>
-                <span>
+                <span class="toggle-text">
                   <strong>Required — employees must confirm</strong>
-                  <span>Pinned to the top of their feed with a "Got it" button until they confirm.</span>
+                  <span class="toggle-sub">Pinned to the top of their feed with a "Got it" button until they confirm.</span>
                 </span>
               </label>
-              <div class="nudge" id="required-nudge" hidden>
+              <div class="nudge" id="required-nudge"${d.required ? "" : " hidden"}>
                 <p><span class="nudge-label"><span aria-hidden="true">💡</span> Hint:</span> Use Required for safety and policy updates only, so your team doesn't tune them out.</p>
-                <p id="nudge-count"></p>
+                <p id="nudge-count">${d.required ? nudgeCountHtml(selectedIds) : ""}</p>
               </div>
             </div>
-            <div class="field" id="due-field" hidden>
+            <div class="field" id="due-field"${d.required ? "" : " hidden"}>
               <label for="f-due">Confirm by <span class="optional">(optional)</span></label>
-              <input type="date" id="f-due" min="${dateInputValue(Date.now())}">
+              <input type="date" id="f-due" data-field="due" value="${esc(d.due)}"
+                min="${dateInputValue(Date.now())}" aria-describedby="err-due">
+              ${errorSlot("due")}
               <div class="hint">Anyone who hasn't confirmed by the end of this day is marked Overdue.</div>
             </div>
-            <p class="form-error" id="form-error" hidden></p>
             <div class="form-actions">
               <button type="submit" class="btn-primary">Post announcement</button>
             </div>
@@ -551,136 +704,11 @@
       </div>`;
   }
 
-  /* ----- Tracking tab ----- */
-
-  function renderTrackingTab(user) {
-    const anns = requiredForManager(user);
-    if (!anns.length) {
-      return `<div class="card"><p class="empty">No required announcements yet. Turn on "Required" when posting to track who has confirmed.</p></div>`;
-    }
-    return `<div class="tracking-list">${anns.map((a) => trackingCard(a, user)).join("")}</div>`;
-  }
-
-  function trackingCard(ann, user) {
-    const isOps = user.role === "ops";
-    const storeIds = trackedStoreIds(ann, user);
-    const s = statsFor(ann, storeIds);
-    const author = userById(ann.authorId);
-
-    const body = isOps ? storeBreakdown(ann, storeIds) : peopleLists(ann, s);
-
-    let due = "";
-    if (ann.dueAt) {
-      due = isPastDue(ann)
-        ? `<div class="due-line is-overdue">Was due ${esc(formatDay(ann.dueAt))}</div>`
-        : `<div class="due-line">Confirm by ${esc(formatDay(ann.dueAt))}</div>`;
-    }
-
-    return `
-      <section class="card track-card">
-        <div class="track-head">
-          <div>
-            <h2>${esc(ann.title)}</h2>
-            <div class="meta">${esc(audienceLabel(ann.storeIds))} · Posted by ${esc(author ? firstName(author) : "Unknown")} · ${esc(formatDateTime(ann.createdAt))}</div>
-            ${due}
-          </div>
-          <div class="track-summary ${rateClass(s.rate)}">
-            <strong>${s.confirmed.length} of ${s.total}</strong> confirmed
-            ${s.overdue ? `<div class="overdue-count">${s.overdue} overdue</div>` : ""}
-          </div>
-        </div>
-        ${progressBar(s.rate)}
-        ${body}
-      </section>`;
-  }
-
-  function storeBreakdown(ann, storeIds) {
-    const rows = storeIds
-      .map(storeById)
-      .filter(Boolean)
-      .sort((a, b) => a.number - b.number)
-      .map((store) => {
-        const s = statsFor(ann, [store.id]);
-        const key = `${ann.id}:${store.id}`;
-        const open = openStores.has(key);
-        const low = s.total > 0 && s.rate < TARGET_RATE;
-        return `
-          <li class="store-item${low ? " is-low" : ""}">
-            <button type="button" class="store-row" data-action="toggle-store" data-key="${esc(key)}"
-              aria-expanded="${open}">
-              <span class="store-name"><span class="store-name-text">${esc(storeLabel(store))}</span>${
-                s.overdue ? `<span class="overdue-pill">${s.overdue} overdue</span>` : ""
-              }</span>
-              <span class="store-bar">${s.total ? progressBar(s.rate, "progress-sm") : ""}</span>
-              <span class="store-count">${s.confirmed.length}/${s.total}</span>
-              <span class="store-pct">${s.total ? pct(s.rate) : "—"}</span>
-              <span class="chev" aria-hidden="true"></span>
-            </button>
-            ${open ? `<div class="store-people">${peopleLists(ann, s)}</div>` : ""}
-          </li>`;
-      })
-      .join("");
-
-    return `
-      <div class="breakdown-label">By store <span class="hint-inline">· under ${pct(TARGET_RATE)} highlighted · tap a store to see people</span></div>
-      <ul class="store-list">${rows}</ul>`;
-  }
-
-  function peopleLists(ann, s) {
-    if (!s.total) return `<p class="empty">No employees at this store.</p>`;
-
-    const pendingHtml = s.pending.length
-      ? s.pending
-          .map((u) => {
-            const reminded = remindedAt(ann.id, u.id);
-            const isNew = u.joinedAt && u.joinedAt > ann.createdAt;
-            return `
-              <li class="person">
-                <div class="person-main">
-                  <span class="person-name">${esc(u.name)}</span>
-                  ${isOverdue(ann, u.id) ? '<span class="tag tag-overdue">Overdue</span>' : ""}
-                  ${isNew ? '<span class="tag">Joined after this was posted</span>' : ""}
-                  ${reminded ? `<div class="person-sub reminded">Reminder sent · ${esc(formatDateTime(reminded))}</div>` : ""}
-                </div>
-                <button type="button" class="btn-remind" data-action="remind"
-                  data-ann="${esc(ann.id)}" data-user="${esc(u.id)}">${reminded ? "Remind again" : "Remind"}</button>
-              </li>`;
-          })
-          .join("")
-      : `<li class="person empty">Everyone has confirmed. 🎉</li>`;
-
-    const confirmedHtml = s.confirmed.length
-      ? s.confirmed
-          .map(
-            (u) => `
-              <li class="person">
-                <div class="person-main">
-                  <span class="person-name">${esc(u.name)}</span>
-                </div>
-                <span class="person-time">✓ ${esc(formatDateTime(confirmedAt(ann.id, u.id)))}</span>
-              </li>`
-          )
-          .join("")
-      : `<li class="person empty">No one yet.</li>`;
-
-    return `
-      <div class="people-cols">
-        <div>
-          <div class="people-label pending">Not confirmed (${s.pending.length})</div>
-          <ul class="people">${pendingHtml}</ul>
-        </div>
-        <div>
-          <div class="people-label done">Confirmed (${s.confirmed.length})</div>
-          <ul class="people">${confirmedHtml}</ul>
-        </div>
-      </div>`;
-  }
-
-  function bindManagerForm(user) {
+  function bindPostForm(user) {
     const form = $("#post-form");
     if (!form) return;
     const isOps = user.role === "ops";
-    const errorEl = $("#form-error");
+    const d = getDraft(user);
     const requiredBox = $("#f-required");
 
     // Never trust the form for store scope: enforce by role.
@@ -689,25 +717,48 @@
         ? [...form.querySelectorAll('input[name="store"]:checked')].map((b) => b.value)
         : [user.storeId];
 
+    function syncDraft() {
+      d.title = $("#f-title").value;
+      d.body = $("#f-body").value;
+      d.required = requiredBox.checked;
+      d.due = $("#f-due").value;
+      if (isOps) d.stores = selectedStoreIds();
+    }
+
     function updateRequiredUI() {
       const on = requiredBox.checked;
       $("#required-nudge").hidden = !on;
       $("#due-field").hidden = !on;
       if (on) $("#nudge-count").innerHTML = nudgeCountHtml(selectedStoreIds());
+      if (!on) clearFieldError(form, "due");
     }
-    requiredBox.addEventListener("change", updateRequiredUI);
+
+    form.addEventListener("input", (e) => {
+      const key = e.target.getAttribute("data-field");
+      if (key) clearFieldError(form, key);
+      syncDraft();
+    });
+    requiredBox.addEventListener("change", () => {
+      updateRequiredUI();
+      syncDraft();
+    });
 
     if (isOps) {
       const allBox = $("#pick-all");
       const storeBoxes = [...form.querySelectorAll('input[name="store"]')];
+      const onStoresChanged = () => {
+        clearFieldError(form, "stores");
+        updateRequiredUI();
+        syncDraft();
+      };
       allBox.addEventListener("change", () => {
         storeBoxes.forEach((b) => (b.checked = allBox.checked));
-        updateRequiredUI();
+        onStoresChanged();
       });
       storeBoxes.forEach((b) =>
         b.addEventListener("change", () => {
           allBox.checked = storeBoxes.every((x) => x.checked);
-          updateRequiredUI();
+          onStoresChanged();
         })
       );
     }
@@ -721,18 +772,15 @@
       const dueAt = required && dueValue ? parseDateInput(dueValue) : null;
       const storeIds = selectedStoreIds();
 
-      const problems = [];
-      if (!title) problems.push("a title");
-      if (!body) problems.push("a message");
-      if (!storeIds.length) problems.push("at least one store");
-      if (problems.length) {
-        errorEl.textContent = `Please add ${problems.join(", ")}.`;
-        errorEl.hidden = false;
-        return;
-      }
+      const errors = {};
+      if (!title) errors.title = "Add a title so people know what this is about.";
+      if (!body) errors.body = "Add a message.";
+      if (!storeIds.length) errors.stores = "Pick at least one store.";
       if (required && dueValue && (!dueAt || dueAt < Date.now())) {
-        errorEl.textContent = "The Confirm by date can't be in the past.";
-        errorEl.hidden = false;
+        errors.due = "Pick today or a later date.";
+      }
+      if (Object.keys(errors).length) {
+        showFieldErrors(form, errors);
         return;
       }
 
@@ -748,6 +796,7 @@
       if (dueAt) ann.dueAt = dueAt;
       data.announcements.push(ann);
       saveData(data);
+      delete ui.drafts[user.id];
       render();
       toast(
         `Posted to ${audienceLabel(storeIds)}` +
@@ -756,24 +805,301 @@
     });
   }
 
-  /* ---------------- Employee view ---------------- */
+  /* ----- Tracking tab ----- */
 
-  function postCard(a, { pinned, confirmedTs }) {
+  function renderTrackingTab(user) {
+    const anns = requiredForManager(user);
+    if (!anns.length) {
+      return `<div class="card empty-state">
+          <div class="empty-icon" aria-hidden="true">✅</div>
+          <p><strong>No Required announcements yet</strong></p>
+          <p>Turn on "Required" when posting to track who has confirmed.</p>
+        </div>`;
+    }
+    return `<div class="tracking-list">${anns.map((a) => trackingCard(a, user)).join("")}</div>`;
+  }
+
+  function trackingCard(ann, user) {
+    const isOps = user.role === "ops";
+    const storeIds = trackedStoreIds(ann, user);
+    const s = statsFor(ann, storeIds);
+    const author = userById(ann.authorId);
+
+    let due = "";
+    if (ann.dueAt) {
+      due = isPastDue(ann)
+        ? `<div class="due-line is-overdue">Was due ${esc(formatDay(ann.dueAt))}</div>`
+        : `<div class="due-line">Confirm by ${esc(formatDay(ann.dueAt))}</div>`;
+    }
+
+    const summary = s.total
+      ? `<strong>${s.confirmed.length} of ${s.total}</strong> confirmed
+         ${s.overdue ? `<div class="overdue-count">${s.overdue} overdue</div>` : ""}`
+      : `<strong class="muted">No employees yet</strong>`;
+
+    let body;
+    if (isOps) {
+      const allDone = s.total > 0 && s.pending.length === 0;
+      body = (allDone ? `<div class="all-confirmed">Everyone's confirmed 🎉</div>` : "") + storeBreakdown(ann, storeIds);
+    } else {
+      body = peopleLists(ann, s, user);
+    }
+
+    return `
+      <section class="card track-card">
+        <div class="track-head">
+          <div class="track-title">
+            <h2>${esc(ann.title)}</h2>
+            <div class="meta">${esc(audienceLabel(ann.storeIds))} · Posted by ${esc(author ? firstName(author) : "Unknown")} · ${esc(formatDateTime(ann.createdAt))}</div>
+            ${due}
+          </div>
+          <div class="track-summary ${s.total ? rateClass(s.rate) : ""}">${summary}</div>
+        </div>
+        ${s.total ? progressBar(s.rate) : ""}
+        ${body}
+        <div class="card-foot">${deleteButton(ann, user)}</div>
+        ${confirmDeleteBar(ann)}
+      </section>`;
+  }
+
+  function storeBreakdown(ann, storeIds) {
+    const rows = storeIds
+      .map(storeById)
+      .filter(Boolean)
+      .sort((a, b) => a.number - b.number)
+      .map((store) => {
+        const s = statsFor(ann, [store.id]);
+        const key = `${ann.id}:${store.id}`;
+        const open = ui.openStores.has(key);
+        const low = s.total > 0 && s.rate < TARGET_RATE;
+        return `
+          <li class="store-item${low ? " is-low" : ""}">
+            <button type="button" class="store-row" data-action="toggle-store" data-key="${esc(key)}"
+              aria-expanded="${open}">
+              <span class="store-name"><span class="store-name-text">${esc(storeLabel(store))}</span>${
+                s.overdue ? `<span class="overdue-pill">${s.overdue} overdue</span>` : ""
+              }</span>
+              <span class="store-bar">${s.total ? progressBar(s.rate, "progress-sm") : '<span class="muted small">No employees</span>'}</span>
+              <span class="store-count">${s.total ? `${s.confirmed.length}/${s.total}` : "—"}</span>
+              <span class="store-pct">${s.total ? pct(s.rate) : "—"}</span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+            ${open ? `<div class="store-people">${peopleLists(ann, s, null)}</div>` : ""}
+          </li>`;
+      })
+      .join("");
+
+    return `
+      <div class="breakdown-label">By store <span class="hint-inline">· under ${pct(TARGET_RATE)} highlighted · tap a store to see people</span></div>
+      <ul class="store-list">${rows}</ul>`;
+  }
+
+  function peopleLists(ann, s, user) {
+    if (!s.total) {
+      return `<p class="empty-inline">No employees at this store yet. Add one from the <button type="button" class="link-btn" data-action="tab" data-tab="team">Team</button> tab.</p>`;
+    }
+
+    const confirmedHtml = s.confirmed.length
+      ? s.confirmed
+          .map(
+            (u) => `
+              <li class="person">
+                <div class="person-main"><span class="person-name">${esc(u.name)}</span></div>
+                <span class="person-time">✓ ${esc(formatDateTime(confirmedAt(ann.id, u.id)))}</span>
+              </li>`
+          )
+          .join("")
+      : `<li class="person empty">No one yet.</li>`;
+
+    const confirmedCol = `
+      <div>
+        <div class="people-label done">Confirmed (${s.confirmed.length})</div>
+        <ul class="people">${confirmedHtml}</ul>
+      </div>`;
+
+    // Everyone's confirmed: celebrate, and just show the confirmed list.
+    if (!s.pending.length) {
+      return `${user ? `<div class="all-confirmed">Everyone's confirmed 🎉</div>` : `<div class="all-confirmed sm">Everyone at this store has confirmed 🎉</div>`}
+        <div class="people-cols single">${confirmedCol}</div>`;
+    }
+
+    const pendingHtml = s.pending
+      .map((u) => {
+        const reminded = remindedAt(ann.id, u.id);
+        const isNew = u.joinedAt && u.joinedAt > ann.createdAt;
+        return `
+          <li class="person">
+            <div class="person-main">
+              <span class="person-name">${esc(u.name)}</span>
+              ${isOverdue(ann, u) ? '<span class="tag tag-overdue">Overdue</span>' : ""}
+              ${isNew ? '<span class="tag">Joined after this was posted</span>' : ""}
+              ${reminded ? `<div class="person-sub reminded">Reminder sent · ${esc(formatDateTime(reminded))}</div>` : ""}
+            </div>
+            <button type="button" class="btn-remind" data-action="remind"
+              data-ann="${esc(ann.id)}" data-user="${esc(u.id)}">${reminded ? "Remind again" : "Remind"}</button>
+          </li>`;
+      })
+      .join("");
+
+    return `
+      <div class="people-cols">
+        <div>
+          <div class="people-label pending">Not confirmed (${s.pending.length})</div>
+          <ul class="people">${pendingHtml}</ul>
+        </div>
+        ${confirmedCol}
+      </div>`;
+  }
+
+  /* ----- Team tab (add employee) ----- */
+
+  function renderTeamTab(user) {
+    const isOps = user.role === "ops";
+    const myStore = isOps ? null : storeById(user.storeId);
+    const stores = isOps ? sortedStores() : [myStore];
+
+    const storeField = isOps
+      ? `<select id="e-store" data-field="store" aria-describedby="err-store">
+           <option value="">Choose a store…</option>
+           ${stores.map((s) => `<option value="${esc(s.id)}">${esc(storeLabel(s))}</option>`).join("")}
+         </select>`
+      : `<div class="static-value">${esc(storeLabel(myStore))}</div>`;
+
+    let banner = "";
+    const added = ui.lastAddedId && userById(ui.lastAddedId);
+    if (added) {
+      const n = data.announcements.filter((a) => a.required && a.storeIds.includes(added.storeId)).length;
+      banner = `
+        <div class="success-bar" role="status">
+          <p><strong>${esc(added.name)}</strong> was added to ${esc(storeLabel(storeById(added.storeId)))}.
+          ${n
+            ? `They have <strong>${plural(n, "Required announcement")}</strong> to confirm.`
+            : "There are no Required announcements for their store right now."}</p>
+          <button type="button" class="btn-secondary btn-sm" data-action="view-as" data-user="${esc(added.id)}">View ${esc(firstName(added))}'s phone →</button>
+        </div>`;
+    }
+
+    const roster = stores
+      .map((s) => {
+        const people = employeesAt(s.id).sort(byName);
+        const list = people.length
+          ? `<ul class="roster">${people
+              .map((u) => {
+                const isNew = u.joinedAt && Date.now() - u.joinedAt < 14 * DAY;
+                return `<li>
+                  <span class="roster-name">${esc(u.name)}${isNew ? ' <span class="tag">New</span>' : ""}</span>
+                  <button type="button" class="btn-text" data-action="view-as" data-user="${esc(u.id)}">View feed</button>
+                </li>`;
+              })
+              .join("")}</ul>`
+          : `<p class="empty-inline">No employees yet.</p>`;
+        return `<div class="roster-store">
+            <h3>${esc(storeLabel(s))} <span class="count">${people.length}</span></h3>
+            ${list}
+          </div>`;
+      })
+      .join("");
+
+    return `
+      <div class="manager-grid">
+        <section class="card">
+          <h2>Add employee</h2>
+          <form id="add-employee-form" novalidate>
+            <div class="field">
+              <label for="e-name">Full name</label>
+              <input type="text" id="e-name" data-field="name" maxlength="60" autocomplete="off"
+                placeholder="e.g. Jamie Rivera" aria-describedby="err-name">
+              ${errorSlot("name")}
+            </div>
+            <div class="field">
+              <label${isOps ? ' for="e-store"' : ""}>Store</label>
+              ${storeField}
+              ${errorSlot("store")}
+            </div>
+            <p class="hint">New hires see every Required announcement for their store and must confirm them.</p>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">Add employee</button>
+            </div>
+          </form>
+          ${banner}
+        </section>
+        <section class="card">
+          <h2>${isOps ? "Team by store" : "Your team"}</h2>
+          ${roster}
+        </section>
+      </div>`;
+  }
+
+  function bindAddEmployeeForm(user) {
+    const form = $("#add-employee-form");
+    if (!form) return;
+    const isOps = user.role === "ops";
+
+    form.addEventListener("input", (e) => {
+      const key = e.target.getAttribute("data-field");
+      if (key) clearFieldError(form, key);
+    });
+    form.addEventListener("change", (e) => {
+      const key = e.target.getAttribute("data-field");
+      if (key) clearFieldError(form, key);
+    });
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = $("#e-name").value.trim().replace(/\s+/g, " ");
+      const storeId = isOps ? $("#e-store").value : user.storeId; // store managers: own store only
+
+      const errors = {};
+      if (!name) errors.name = "Enter the employee's name.";
+      if (!storeId || !storeById(storeId)) errors.store = "Pick a store.";
+      if (
+        name && storeId &&
+        employeesAt(storeId).some((u) => u.name.toLowerCase() === name.toLowerCase())
+      ) {
+        errors.name = `${name} already works at Store ${storeById(storeId).number}.`;
+      }
+      if (Object.keys(errors).length) {
+        showFieldErrors(form, errors);
+        return;
+      }
+
+      const newUser = {
+        id: "u-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        name,
+        role: "employee",
+        storeId,
+        joinedAt: Date.now(),
+      };
+      data.users.push(newUser);
+      saveData(data);
+      ui.lastAddedId = newUser.id;
+      renderEmployeeOptions();
+      syncSwitcher();
+      render();
+      toast(`Added ${name}`);
+    });
+  }
+
+  /* ---------------- Employee view (in a phone frame on desktop) ---------------- */
+
+  function postCard(a, user, { pinned, confirmedTs }) {
     const author = userById(a.authorId);
     const authorLine = author
       ? `${firstName(author)} · ${author.role === "ops" ? "Operations" : "Store Manager"}`
       : "Management";
+
+    let due = "";
+    if (pinned && a.dueAt) {
+      if (!isPastDue(a)) due = `<div class="due-pill">Confirm by ${esc(formatDay(a.dueAt))}</div>`;
+      else if (joinedAfterDue(a, user)) due = `<div class="due-pill">Please confirm — you're new since this went out</div>`;
+      else due = `<div class="due-pill is-overdue">Overdue · was due ${esc(formatDay(a.dueAt))}</div>`;
+    }
+
     return `
       <article class="post${pinned ? " pinned" : ""}">
         <h3>${esc(a.title)}${confirmedTs ? '<span class="badge badge-ok">✓ Confirmed</span>' : ""}</h3>
         <div class="meta">${esc(authorLine)} · ${esc(timeAgo(a.createdAt))}</div>
-        ${
-          pinned && a.dueAt
-            ? isPastDue(a)
-              ? `<div class="due-pill is-overdue">Overdue · was due ${esc(formatDay(a.dueAt))}</div>`
-              : `<div class="due-pill">Confirm by ${esc(formatDay(a.dueAt))}</div>`
-            : ""
-        }
+        ${due}
         <p>${esc(a.body)}</p>
         ${pinned ? `<button type="button" class="got-it" data-action="confirm" data-ann="${esc(a.id)}">Got it</button>` : ""}
         ${confirmedTs ? `<div class="confirmed-note">You confirmed ${esc(timeAgo(confirmedTs))}</div>` : ""}
@@ -790,28 +1116,50 @@
     const pending = mine.filter(needsConfirm);
     const rest = mine.filter((a) => !needsConfirm(a));
 
-    const pendingHtml = pending.length
-      ? `<div class="section-label required">Needs your confirmation (${pending.length})</div>
-         ${pending.map((a) => postCard(a, { pinned: true })).join("")}`
-      : `<div class="all-clear">✓ You're all caught up on required announcements.</div>`;
-
-    const restHtml = rest.length
-      ? rest
-          .map((a) =>
-            postCard(a, { pinned: false, confirmedTs: a.required ? confirmedAt(a.id, user.id) : null })
-          )
-          .join("")
-      : `<p class="empty">No other announcements yet.</p>`;
+    let content;
+    if (!mine.length) {
+      content = `
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">📭</div>
+          <p><strong>No announcements yet</strong></p>
+          <p>Updates from your managers will show up here.</p>
+        </div>`;
+    } else {
+      const pendingHtml = pending.length
+        ? `<div class="section-label required">Needs your confirmation (${pending.length})</div>
+           ${pending.map((a) => postCard(a, user, { pinned: true })).join("")}`
+        : `<div class="all-clear">✓ You're all caught up on required announcements.</div>`;
+      const restHtml = rest.length
+        ? `<div class="section-label">Announcements</div>
+           ${rest
+             .map((a) => postCard(a, user, { pinned: false, confirmedTs: a.required ? confirmedAt(a.id, user.id) : null }))
+             .join("")}`
+        : "";
+      content = pendingHtml + restHtml;
+    }
 
     return `
-      <div class="feed">
-        <div class="feed-greeting">
-          <h1>Hi, ${esc(firstName(user))}</h1>
-          <p>${esc(storeLabel(store))}</p>
+      <div class="phone-wrap">
+        <div class="phone">
+          <div class="phone-screen" id="phone-screen">
+            <div class="phone-top" aria-hidden="true">
+              <div class="phone-status">
+                <span>9:41</span>
+                <span class="phone-island"></span>
+                <span class="phone-icons"><i></i><i></i><i></i><b></b></span>
+              </div>
+              <div class="phone-appbar"><span class="brand-mark sm">S</span> Summit Updates</div>
+            </div>
+            <div class="feed">
+              <div class="feed-greeting">
+                <h1>Hi, ${esc(firstName(user))}</h1>
+                <p>${esc(storeLabel(store))}</p>
+              </div>
+              ${content}
+            </div>
+          </div>
         </div>
-        ${pendingHtml}
-        <div class="section-label">Announcements</div>
-        ${restHtml}
+        <p class="phone-caption">Employee view · ${esc(user.name)}'s phone</p>
       </div>`;
   }
 
@@ -826,7 +1174,7 @@
     if (action === "confirm" && user.role === "employee") {
       const id = el.getAttribute("data-ann");
       const ann = data.announcements.find((a) => a.id === id);
-      if (!ann || !ann.storeIds.includes(user.storeId)) return;
+      if (!ann || !ann.required || !ann.storeIds.includes(user.storeId)) return;
       data.confirmations[id] = data.confirmations[id] || {};
       data.confirmations[id][user.id] = Date.now();
       saveData(data);
@@ -837,32 +1185,78 @@
 
     if (user.role === "employee") return; // everything below is manager-only
 
-    if (action === "tab") {
-      session.managerTab = el.getAttribute("data-tab");
-      saveSession();
-      render({ scrollTop: true });
-      return;
-    }
+    switch (action) {
+      case "tab": {
+        const tab = el.getAttribute("data-tab");
+        if (!TABS.includes(tab)) return;
+        session.managerTab = tab;
+        saveSession();
+        resetTransientUI();
+        render({ scrollTop: true });
+        return;
+      }
 
-    if (action === "toggle-store") {
-      const key = el.getAttribute("data-key");
-      openStores.has(key) ? openStores.delete(key) : openStores.add(key);
-      render();
-      return;
-    }
+      case "toggle-store": {
+        const key = el.getAttribute("data-key");
+        ui.openStores.has(key) ? ui.openStores.delete(key) : ui.openStores.add(key);
+        render();
+        return;
+      }
 
-    if (action === "remind") {
-      const ann = data.announcements.find((a) => a.id === el.getAttribute("data-ann"));
-      const target = userById(el.getAttribute("data-user"));
-      if (!ann || !target) return;
-      // Managers can only remind people at stores they're allowed to track.
-      if (!trackedStoreIds(ann, user).includes(target.storeId)) return;
-      data.reminders[ann.id] = data.reminders[ann.id] || {};
-      const ts = Date.now();
-      data.reminders[ann.id][target.id] = ts;
-      saveData(data);
-      render();
-      toast(`Reminder sent to ${firstName(target)} · ${formatDateTime(ts)} (demo — no message sent)`);
+      case "remind": {
+        const ann = data.announcements.find((a) => a.id === el.getAttribute("data-ann"));
+        const target = userById(el.getAttribute("data-user"));
+        if (!ann || !target || confirmedAt(ann.id, target.id)) return;
+        // Managers can only remind people at stores they're allowed to track.
+        if (!trackedStoreIds(ann, user).includes(target.storeId)) return;
+        data.reminders[ann.id] = data.reminders[ann.id] || {};
+        const ts = Date.now();
+        data.reminders[ann.id][target.id] = ts;
+        saveData(data);
+        render();
+        toast(`Reminder sent to ${firstName(target)} · ${formatDateTime(ts)} (demo — no message sent)`);
+        return;
+      }
+
+      case "ask-delete": {
+        const ann = data.announcements.find((a) => a.id === el.getAttribute("data-ann"));
+        if (!ann || !canDelete(ann, user)) return;
+        ui.pendingDeleteId = ann.id;
+        render();
+        return;
+      }
+
+      case "cancel-delete":
+        ui.pendingDeleteId = null;
+        render();
+        return;
+
+      case "do-delete": {
+        const id = el.getAttribute("data-ann");
+        const ann = data.announcements.find((a) => a.id === id);
+        if (!ann || !canDelete(ann, user)) return;
+        data.announcements = data.announcements.filter((a) => a.id !== id);
+        delete data.confirmations[id];
+        delete data.reminders[id];
+        [...ui.openStores].forEach((k) => k.startsWith(id + ":") && ui.openStores.delete(k));
+        ui.pendingDeleteId = null;
+        saveData(data);
+        render();
+        toast("Announcement deleted");
+        return;
+      }
+
+      case "view-as": {
+        const target = userById(el.getAttribute("data-user"));
+        if (!target || target.role !== "employee") return;
+        session.role = "employee";
+        session.employeeId = target.id;
+        saveSession();
+        resetTransientUI();
+        syncSwitcher();
+        render({ scrollTop: true });
+        return;
+      }
     }
   });
 
@@ -871,12 +1265,22 @@
   function render({ scrollTop = false } = {}) {
     const app = $("#app");
     const user = currentUser();
+    // Re-rendering replaces the phone screen, so keep its scroll position unless we're changing view.
+    const phone = $("#phone-screen");
+    const phoneScroll = !scrollTop && phone ? phone.scrollTop : 0;
+
     if (user.role === "employee") {
       app.innerHTML = renderEmployee(user);
+      const ps = $("#phone-screen");
+      if (ps) ps.scrollTop = phoneScroll;
     } else {
       app.innerHTML = renderManager(user);
-      bindManagerForm(user);
+      bindPostForm(user);
+      bindAddEmployeeForm(user);
     }
+
+    const autofocus = app.querySelector("[data-autofocus]");
+    if (autofocus) autofocus.focus({ preventScroll: true });
     if (scrollTop) window.scrollTo(0, 0);
   }
 
