@@ -627,7 +627,9 @@
             let progress = "";
             if (a.required) {
               const s = statsFor(a, trackedStoreIds(a, user));
-              progress = ` · <button type="button" class="link-btn" data-action="tab" data-tab="tracking">${s.confirmed.length} of ${s.total} confirmed</button>`;
+              progress = s.total
+                ? ` · <button type="button" class="link-btn" data-action="tab" data-tab="tracking">${s.confirmed.length} of ${s.total} confirmed</button>`
+                : " · No employees yet";
             }
             return `<li>
               <div class="posted-row">
