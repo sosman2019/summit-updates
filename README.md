@@ -1,5 +1,7 @@
 # Summit Updates
 
+**Live demo:** https://sosman2019.github.io/summit-updates/
+
 A prototype announcement app for Summit Retail Group.
 
 ## What this is
